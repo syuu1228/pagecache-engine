@@ -151,7 +151,7 @@ ENGINE_ERROR_CODE create_instance(uint64_t interface,
          .arithmetic = pagecache_arithmetic,
          .flush = pagecache_flush,
          .unknown_command = pagecache_unknown_command,
-         .item_set_cas = NULL,
+         .item_set_cas = item_set_cas,
          .get_item_info = get_item_info,
          .get_tap_iterator = get_tap_iterator
       },
@@ -679,6 +679,12 @@ static ENGINE_ERROR_CODE pagecache_unknown_command(ENGINE_HANDLE* handle,
     } else {
         return ENGINE_FAILED;
     }
+}
+
+void item_set_cas(ENGINE_HANDLE *handle, const void *cookie,
+                  item* item, uint64_t val)
+{
+    return ENGINE_ENOTSUP;
 }
 
 const void* item_get_key(const hash_item* item)
