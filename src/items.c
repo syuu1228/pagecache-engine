@@ -85,7 +85,7 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
         return NULL;
     }
 
-    it->data = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_PRIVATE, -1, 0);
+    it->data = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if(it->data == MAP_FAILED) {
         free(it);
         return NULL;
@@ -159,7 +159,7 @@ static void item_unlink_q(struct pagecache_engine *engine, hash_item *it) {
 
 int do_item_link(struct pagecache_engine *engine, hash_item *it) {
     assert((it->iflag & (ITEM_LINKED|ITEM_SLABBED)) == 0);
-    assert(it->nbytes < (1024 * 1024));  /* 1MB max size */
+
     it->iflag |= ITEM_LINKED;
     it->time = engine->server.core->get_current_time();
     assoc_insert(engine, engine->server.core->hash(item_get_key(it), it->nkey, 0),
