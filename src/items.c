@@ -55,17 +55,8 @@ void item_stats_reset(struct pagecache_engine *engine) {
 static inline size_t ITEM_ntotal(struct pagecache_engine *engine,
                                  const hash_item *it) {
     size_t ret = sizeof(*it) + it->nkey + it->nbytes;
-    if (engine->config.use_cas) {
-        ret += sizeof(uint64_t);
-    }
 
     return ret;
-}
-
-/* Get the next CAS id for a new item. */
-static uint64_t get_cas_id(void) {
-    static uint64_t cas_id = 0;
-    return ++cas_id;
 }
 
 /*@null@*/
