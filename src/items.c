@@ -18,6 +18,8 @@
 
 #include "pagecache_engine.h"
 
+static const int RAM_MAX = (1 * 1024 * 1024), DISK_MAX = (2 * 1024 * 1024);
+ 
 /* Forward Declarations */
 static void item_link_q(struct pagecache_engine *engine, hash_item *it);
 static void item_unlink_q(struct pagecache_engine *engine, hash_item *it);
@@ -69,19 +71,88 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
                          const void *cookie) {
     hash_item *it = NULL;
     size_t ntotal = sizeof(hash_item) + nkey;
+    int fd;
+
+    /* do a quick check if we have any expired items in the tail.. */
+    int tries = 50;
+    hash_item *search;
 
     rel_time_t current_time = engine->server.core->get_current_time();
+#if 0
+    for (search = engine->items.tails;
+         tries > 0 && search != NULL;
+         tries--, search=search->prev) {
+        if (search->refcount == 0 &&
+            (search->exptime != 0 && search->exptime < current_time)) {
+            /* I don't want to actually free the object, just steal
+             * the item to avoid to grab the slab mutex twice ;-)
+             */
+            pthread_mutex_lock(&engine->stats.lock);
+            engine->stats.reclaimed++;
+            pthread_mutex_unlock(&engine->stats.lock);
+            engine->items.itemstats.reclaimed++;
+            search->refcount = 1;
+            do_item_unlink(engine, search);
+            /* Initialize the item block: */
+            search->refcount = 0;
+            break;
+        }
+    }
+#endif
+#if 0
+    tries = 50;
 
+    for (search = engine->items.tails; tries > 0 && search != NULL; tries--, search=search->prev) {
+        if (search->refcount == 0) {
+            if (search->exptime == 0 || search->exptime > current_time) {
+                engine->items.itemstats.evicted++;
+                engine->items.itemstats.evicted_time = current_time - search->time;
+                if (search->exptime != 0) {
+                    engine->items.itemstats.evicted_nonzero++;
+                }
+                pthread_mutex_lock(&engine->stats.lock);
+                engine->stats.evictions++;
+                pthread_mutex_unlock(&engine->stats.lock);
+                engine->server.stat->evicting(cookie,
+                                              item_get_key(search),
+                                              search->nkey);
+            } else {
+                engine->items.itemstats.reclaimed++;
+                pthread_mutex_lock(&engine->stats.lock);
+                engine->stats.reclaimed++;
+                pthread_mutex_unlock(&engine->stats.lock);
+            }
+            do_item_unlink(engine, search);
+            break;
+        }
+    }
+#endif
+    
     if ((it = (hash_item *)malloc(ntotal)) == NULL) {
         return NULL;
     }
 
-    it->data = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if(it->data == MAP_FAILED) {
+    fd = open(key, O_RDWR|O_CREAT, 00644);
+    if (fd < 0) {
+        perror("open");
         free(it);
         return NULL;
     }
-
+    if (ftruncate(fd, nbytes)) {
+        perror("ftruncate");
+        close(fd);
+        free(it);
+        return NULL;
+    }
+    it->data = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if(it->data == MAP_FAILED) {
+        perror("mmap");
+        close(fd);
+        free(it);
+        return NULL;
+    }
+    close(fd);
+    
     assert(it != engine->items.heads);
 
     it->next = it->prev = it->h_next = 0;
@@ -157,7 +228,10 @@ int do_item_link(struct pagecache_engine *engine, hash_item *it) {
                  it);
 
     pthread_mutex_lock(&engine->stats.lock);
-    engine->stats.curr_bytes += ITEM_ntotal(engine, it);
+    if (it->iflag & ITEM_SWAPPED)
+        engine->stats.curr_disk_bytes += ITEM_ntotal(engine, it);
+    else
+        engine->stats.curr_mem_bytes += ITEM_ntotal(engine, it);
     engine->stats.curr_items += 1;
     engine->stats.total_items += 1;
     pthread_mutex_unlock(&engine->stats.lock);
@@ -171,12 +245,15 @@ void do_item_unlink(struct pagecache_engine *engine, hash_item *it) {
     if ((it->iflag & ITEM_LINKED) != 0) {
         it->iflag &= ~ITEM_LINKED;
         pthread_mutex_lock(&engine->stats.lock);
-        engine->stats.curr_bytes -= ITEM_ntotal(engine, it);
+        if (it->iflag & ITEM_SWAPPED)
+            engine->stats.curr_disk_bytes -= ITEM_ntotal(engine, it);
+        else
+            engine->stats.curr_mem_bytes -= ITEM_ntotal(engine, it);
         engine->stats.curr_items -= 1;
         pthread_mutex_unlock(&engine->stats.lock);
         assoc_delete(engine, engine->server.core->hash(item_get_key(it), it->nkey, 0),
                      item_get_key(it), it->nkey);
-        item_unlink_q(engine, it);
+	item_unlink_q(engine, it);
         if (it->refcount == 0) {
             item_free(engine, it);
         }

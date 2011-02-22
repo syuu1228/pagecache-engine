@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <stddef.h>
 #include <inttypes.h>
+#include <sys/mount.h>
 
 #include "pagecache_engine.h"
 #include "memcached/util.h"
@@ -220,6 +221,10 @@ static ENGINE_ERROR_CODE pagecache_initialize(ENGINE_HANDLE* handle,
       return ret;
    }
 
+   ret = chdir("/tmp/pagecache");
+   if (ret)
+      return ENGINE_FAILED;
+   
    return ENGINE_SUCCESS;
 }
 
@@ -334,8 +339,10 @@ static ENGINE_ERROR_CODE pagecache_get_stats(ENGINE_HANDLE* handle,
       add_stat("curr_items", 10, val, len, cookie);
       len = sprintf(val, "%"PRIu64, (uint64_t)engine->stats.total_items);
       add_stat("total_items", 11, val, len, cookie);
-      len = sprintf(val, "%"PRIu64, (uint64_t)engine->stats.curr_bytes);
-      add_stat("bytes", 5, val, len, cookie);
+      len = sprintf(val, "%"PRIu64, (uint64_t)engine->stats.curr_mem_bytes);
+      add_stat("mem bytes", 5, val, len, cookie);
+      len = sprintf(val, "%"PRIu64, (uint64_t)engine->stats.curr_disk_bytes);
+      add_stat("disk bytes", 5, val, len, cookie);
       len = sprintf(val, "%"PRIu64, engine->stats.reclaimed);
       add_stat("reclaimed", 9, val, len, cookie);
       len = sprintf(val, "%"PRIu64, (uint64_t)engine->config.maxbytes);

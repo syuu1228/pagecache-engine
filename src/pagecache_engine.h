@@ -43,6 +43,8 @@ extern "C" {
 /* temp */
 #define ITEM_SLABBED (2<<8)
 
+#define ITEM_SWAPPED (3<<8)
+
 struct config {
    bool use_cas;
    size_t verbose;
@@ -69,7 +71,8 @@ struct engine_stats {
    pthread_mutex_t lock;
    uint64_t evictions;
    uint64_t reclaimed;
-   uint64_t curr_bytes;
+   uint64_t curr_mem_bytes;
+   uint64_t curr_disk_bytes; 
    uint64_t curr_items;
    uint64_t total_items;
 };
