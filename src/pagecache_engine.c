@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <inttypes.h>
 #include <sys/mount.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 
 #include "pagecache_engine.h"
 #include "memcached/util.h"
@@ -691,7 +693,6 @@ static ENGINE_ERROR_CODE pagecache_unknown_command(ENGINE_HANDLE* handle,
 void item_set_cas(ENGINE_HANDLE *handle, const void *cookie,
                   item* item, uint64_t val)
 {
-    return ENGINE_ENOTSUP;
 }
 
 const void* item_get_key(const hash_item* item)
@@ -699,8 +700,23 @@ const void* item_get_key(const hash_item* item)
     return (void*)(item + 1);
 }
 
-char* item_get_data(const hash_item* item)
+char* item_get_data(hash_item* item)
 {
+	if (!item->data) {
+		item->fd = open(item_get_key(item), O_RDWR, 00644);
+		printf("item_get_data open(%s) %d\n", item_get_key(item), item->fd);
+		if (item->fd < 0) {
+			perror("open");
+			exit(1);
+			return NULL;
+		}
+		item->data = mmap(NULL, item->nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, item->fd, 0);
+		if(item->data == MAP_FAILED) {
+			perror("mmap");
+			close(item->fd);
+			return NULL;
+		}
+	}
     return (char*)item->data;
 }
 
@@ -721,5 +737,7 @@ static bool get_item_info(ENGINE_HANDLE *handle, const void *cookie,
     item_info->key = item_get_key(it);
     item_info->value[0].iov_base = item_get_data(it);
     item_info->value[0].iov_len = it->nbytes;
+	item_info->fd = it->fd;
+	printf("get_item_info(%s) fd:%d\n", item_get_key(it), it->fd);
     return true;
 }

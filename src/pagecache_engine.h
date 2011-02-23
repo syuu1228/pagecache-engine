@@ -135,7 +135,7 @@ struct pagecache_engine {
    char vbucket_infos[NUM_VBUCKETS];
 };
 
-char* item_get_data(const hash_item* item);
+char* item_get_data(hash_item* item);
 void item_set_cas(ENGINE_HANDLE *handle, const void *cookie,
                   item* item, uint64_t val);
 const void* item_get_key(const hash_item* item);

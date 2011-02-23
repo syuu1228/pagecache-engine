@@ -19,6 +19,7 @@ typedef struct _hash_item {
                      * server, the upper 8 bits is reserved for engine
                      * implementation. */
     unsigned short refcount;
+	int fd;
     void *data;
 } hash_item;
 

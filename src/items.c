@@ -70,8 +70,7 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
                          const int nbytes,
                          const void *cookie) {
     hash_item *it = NULL;
-    size_t ntotal = sizeof(hash_item) + nkey;
-    int fd;
+    size_t ntotal = sizeof(hash_item) + nkey + 1;
 
     /* do a quick check if we have any expired items in the tail.. */
     int tries = 50;
@@ -131,27 +130,30 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
     if ((it = (hash_item *)malloc(ntotal)) == NULL) {
         return NULL;
     }
+    memcpy((void*)item_get_key(it), key, nkey);
+    ((char *)item_get_key(it))[nkey] = '\0';
 
-    fd = open(key, O_RDWR|O_CREAT, 00644);
-    if (fd < 0) {
+    it->fd = open(item_get_key(it), O_RDWR|O_CREAT, 00644);
+    printf("do_item_alloc(%s) %d\n", item_get_key(it), it->fd);
+    if (it->fd < 0) {
         perror("open");
+        exit(1);
         free(it);
         return NULL;
     }
-    if (ftruncate(fd, nbytes)) {
+    if (ftruncate(it->fd, nbytes)) {
         perror("ftruncate");
-        close(fd);
+        close(it->fd);
         free(it);
         return NULL;
     }
-    it->data = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    it->data = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, it->fd, 0);
     if(it->data == MAP_FAILED) {
         perror("mmap");
-        close(fd);
+        close(it->fd);
         free(it);
         return NULL;
     }
-    close(fd);
     
     assert(it != engine->items.heads);
 
@@ -161,7 +163,7 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
     it->nkey = nkey;
     it->nbytes = nbytes;
     it->flags = flags;
-    memcpy((void*)item_get_key(it), key, nkey);
+//    memcpy((void*)item_get_key(it), key, nkey);
     it->exptime = exptime;
     return it;
 }
@@ -173,10 +175,10 @@ static void item_free(struct pagecache_engine *engine, hash_item *it) {
     assert(it != engine->items.heads);
     assert(it != engine->items.tails);
     assert(it->refcount == 0);
-
+    assert(it->data == NULL);
+    
     /* so slab size changer can tell later if item is already free or not */
     it->iflag |= ITEM_SLABBED;
-    munmap(it->data, it->nbytes);
     free(it);
 }
 
@@ -264,8 +266,14 @@ void do_item_release(struct pagecache_engine *engine, hash_item *it) {
     if (it->refcount != 0) {
         it->refcount--;
     }
-    if (it->refcount == 0 && (it->iflag & ITEM_LINKED) == 0) {
-        item_free(engine, it);
+    if (it->refcount == 0) {
+        munmap(it->data, it->nbytes);
+        printf("do_item_release(%s) %d\n", item_get_key(it), it->fd);
+        close(it->fd);
+        it->fd = 0;
+        it->data = NULL;
+        if ((it->iflag & ITEM_LINKED) == 0)
+            item_free(engine, it);
     }
 }
 
