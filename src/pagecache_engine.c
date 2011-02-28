@@ -223,7 +223,7 @@ static ENGINE_ERROR_CODE pagecache_initialize(ENGINE_HANDLE* handle,
       return ret;
    }
 
-   ret = chdir("/tmp/pagecache");
+   ret = chdir(MEM_CACHE_PATH);
    if (ret)
       return ENGINE_FAILED;
    
@@ -702,22 +702,6 @@ const void* item_get_key(const hash_item* item)
 
 char* item_get_data(hash_item* item)
 {
-	if (!item->data) {
-		item->fd = open(item_get_key(item), O_RDWR, 00644);
-		if (item->fd < 0) {
-			perror("open");
-			item->fd = 0;
-			return NULL;
-		}
-		item->data = mmap(NULL, item->nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, item->fd, 0);
-		if(item->data == MAP_FAILED) {
-			perror("mmap");
-			close(item->fd);
-			item->fd = 0;
-			item->data = NULL;
-			return NULL;
-		}
-	}
     return (char*)item->data;
 }
 

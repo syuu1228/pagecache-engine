@@ -17,6 +17,12 @@
 #include <memcached/util.h>
 #include <memcached/visibility.h>
 
+#define MEM_CACHE_PATH  "/tmp/pagecache/mem"
+#define DISK_CACHE_PATH "/tmp/pagecache/disk"
+
+#define MEM_MAX (1 * 1024 * 1024 * 1024UL)
+#define DISK_MAX (2 * 1024 * 1024 * 1024UL)
+
 /* Slab sizing definitions. */
 #define CHUNK_ALIGN_BYTES 8
 #define DONT_PREALLOC_SLABS
@@ -43,7 +49,7 @@ extern "C" {
 /* temp */
 #define ITEM_SLABBED (2<<8)
 
-#define ITEM_SWAPPED (3<<8)
+#define ITEM_SWAPPED (4<<8)
 
 struct config {
    bool use_cas;
@@ -115,7 +121,8 @@ struct pagecache_engine {
    bool initialized;
 
    struct assoc assoc;
-   struct items items;
+   struct items mem_items;
+	struct items disk_items;
 
    /**
     * The cache layer (item_* and assoc_*) is currently protected by

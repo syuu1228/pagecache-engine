@@ -6,8 +6,9 @@
 #include <sys/resource.h>
 #include <sys/mman.h>
 #include <netinet/in.h>
-
+#define __USE_GNU
 #include <fcntl.h>
+#undef __USE_GNU
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -15,14 +16,12 @@
 #include <time.h>
 #include <assert.h>
 #include <inttypes.h>
-
+#include "recvfile.h"
 #include "pagecache_engine.h"
-
-static const int RAM_MAX = (1 * 1024 * 1024), DISK_MAX = (2 * 1024 * 1024);
  
 /* Forward Declarations */
-static void item_link_q(struct pagecache_engine *engine, hash_item *it);
-static void item_unlink_q(struct pagecache_engine *engine, hash_item *it);
+static void item_link_q(struct items *items, hash_item *it);
+static void item_unlink_q(struct items *items, hash_item *it);
 static hash_item *do_item_alloc(struct pagecache_engine *engine,
                                 const void *key, const size_t nkey,
                                 const int flags, const rel_time_t exptime,
@@ -48,7 +47,9 @@ static void item_free(struct pagecache_engine *engine, hash_item *it);
 
 void item_stats_reset(struct pagecache_engine *engine) {
     pthread_mutex_lock(&engine->cache_lock);
-    memset(&engine->items.itemstats, 0, sizeof(engine->items.itemstats));
+    memset(&engine->mem_items.itemstats, 0, sizeof(engine->mem_items.itemstats));
+    memset(&engine->disk_items.itemstats, 0, sizeof(engine->disk_items.itemstats));
+    //XXX unlink all items
     pthread_mutex_unlock(&engine->cache_lock);
 }
 
@@ -71,61 +72,87 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
                          const void *cookie) {
     hash_item *it = NULL;
     size_t ntotal = sizeof(hash_item) + nkey + 1;
-
     /* do a quick check if we have any expired items in the tail.. */
     int tries = 50;
     hash_item *search;
-
     rel_time_t current_time = engine->server.core->get_current_time();
-#if 0
-    for (search = engine->items.tails;
-         tries > 0 && search != NULL;
-         tries--, search=search->prev) {
-        if (search->refcount == 0 &&
-            (search->exptime != 0 && search->exptime < current_time)) {
-            /* I don't want to actually free the object, just steal
-             * the item to avoid to grab the slab mutex twice ;-)
-             */
-            pthread_mutex_lock(&engine->stats.lock);
-            engine->stats.reclaimed++;
-            pthread_mutex_unlock(&engine->stats.lock);
-            engine->items.itemstats.reclaimed++;
-            search->refcount = 1;
-            do_item_unlink(engine, search);
-            /* Initialize the item block: */
-            search->refcount = 0;
-            break;
+
+    if (engine->stats.curr_mem_bytes >= MEM_MAX) {
+        tries = 50;
+        for (search = engine->mem_items.tails;
+             tries > 0 && search != NULL && engine->stats.curr_mem_bytes >= MEM_MAX;
+             tries--, search=search->prev) {
+            if (search->refcount == 0 &&
+                (search->exptime != 0 && search->exptime < current_time)) {
+                pthread_mutex_lock(&engine->stats.lock);
+                engine->stats.reclaimed++;
+                pthread_mutex_unlock(&engine->stats.lock);
+                engine->mem_items.itemstats.reclaimed++;
+                do_item_unlink(engine, search);
+            }
+            if (search->refcount == 0) {
+                int mem_fd, disk_fd;
+                assert(!search->fd);
+                assert(!search->data);
+                assert(!(search->iflag & ITEM_SWAPPED));
+                mem_fd = open(item_get_key(search), O_RDWR, 00644);
+                if (mem_fd < 0) {
+                    perror("open");
+                    abort();
+                }
+                chdir(DISK_CACHE_PATH);
+                disk_fd = open(item_get_key(search), O_RDWR|O_CREAT, 00644);
+                if (ftruncate(disk_fd, search->nbytes)) {
+                    perror("ftruncate");
+                    abort();
+                }
+                if (recvfile(disk_fd, mem_fd, NULL, search->nbytes) != search->nbytes) {
+                    perror("recvfile");
+                    abort();
+                }
+                close(mem_fd);
+                close(disk_fd);
+                chdir(MEM_CACHE_PATH);
+                unlink(item_get_key(search));
+                search->iflag |= ITEM_SWAPPED;
+                pthread_mutex_lock(&engine->stats.lock);
+                engine->stats.curr_mem_bytes -= search->nbytes;
+                engine->stats.curr_disk_bytes += search->nbytes;
+                pthread_mutex_unlock(&engine->stats.lock);
+                item_unlink_q(&engine->mem_items, search);
+                item_link_q(&engine->disk_items, search);
+            }
         }
     }
-#endif
-#if 0
-    tries = 50;
-
-    for (search = engine->items.tails; tries > 0 && search != NULL; tries--, search=search->prev) {
-        if (search->refcount == 0) {
+    if (engine->stats.curr_disk_bytes >= DISK_MAX) {
+        tries = 50;
+        for (search = engine->disk_items.tails;
+             tries > 0 && search != NULL && engine->stats.curr_disk_bytes >= DISK_MAX;
+             tries--, search=search->prev) {
+            assert(search->refcount == 0);
             if (search->exptime == 0 || search->exptime > current_time) {
-                engine->items.itemstats.evicted++;
-                engine->items.itemstats.evicted_time = current_time - search->time;
+                engine->disk_items.itemstats.evicted++;
+                engine->disk_items.itemstats.evicted_time = current_time - search->time;
                 if (search->exptime != 0) {
-                    engine->items.itemstats.evicted_nonzero++;
+                    engine->disk_items.itemstats.evicted_nonzero++;
                 }
                 pthread_mutex_lock(&engine->stats.lock);
                 engine->stats.evictions++;
                 pthread_mutex_unlock(&engine->stats.lock);
+                printf("evicting %s\n", item_get_key(search));
                 engine->server.stat->evicting(cookie,
                                               item_get_key(search),
                                               search->nkey);
             } else {
-                engine->items.itemstats.reclaimed++;
+                engine->disk_items.itemstats.reclaimed++;
                 pthread_mutex_lock(&engine->stats.lock);
                 engine->stats.reclaimed++;
                 pthread_mutex_unlock(&engine->stats.lock);
             }
+            printf("unlinking %s\n", item_get_key(search));
             do_item_unlink(engine, search);
-            break;
         }
     }
-#endif
     
     if ((it = (hash_item *)malloc(ntotal)) == NULL) {
         return NULL;
@@ -137,7 +164,6 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
     it->fd = open(item_get_key(it), O_RDWR|O_CREAT, 00644);
     if (it->fd < 0) {
         perror("open");
-        exit(1);
         free(it);
         return NULL;
     }
@@ -155,7 +181,7 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
         return NULL;
     }
     
-    assert(it != engine->items.heads);
+    assert(it != engine->mem_items.heads);
 
     it->next = it->prev = it->h_next = 0;
     it->refcount = 1;     /* the caller will have a reference */
@@ -168,25 +194,28 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
 }
 
 static void item_free(struct pagecache_engine *engine, hash_item *it) {
-    size_t ntotal = ITEM_ntotal(engine, it);
     unsigned int clsid;
     assert((it->iflag & ITEM_LINKED) == 0);
-    assert(it != engine->items.heads);
-    assert(it != engine->items.tails);
+    assert(it != engine->mem_items.heads);
+    assert(it != engine->mem_items.tails);
     assert(it->refcount == 0);
     assert(it->data == NULL);
     
-    /* so slab size changer can tell later if item is already free or not */
-    it->iflag |= ITEM_SLABBED;
+    if (it->iflag & ITEM_SWAPPED) {
+        chdir(DISK_CACHE_PATH);
+        unlink(item_get_key(it));
+        chdir(MEM_CACHE_PATH);
+    }else
+        unlink(item_get_key(it));
     free(it);
 }
 
-static void item_link_q(struct pagecache_engine *engine, hash_item *it) { /* item is the new head */
+static void item_link_q(struct items *items, hash_item *it) { /* item is the new head */
     hash_item **head, **tail;
     assert((it->iflag & ITEM_SLABBED) == 0);
 
-    head = &engine->items.heads;
-    tail = &engine->items.tails;
+    head = &items->heads;
+    tail = &items->tails;
     assert(it != *head);
     assert((*head && *tail) || (*head == 0 && *tail == 0));
     it->prev = 0;
@@ -194,14 +223,14 @@ static void item_link_q(struct pagecache_engine *engine, hash_item *it) { /* ite
     if (it->next) it->next->prev = it;
     *head = it;
     if (*tail == 0) *tail = it;
-    engine->items.sizes++;
+    items->sizes++;
     return;
 }
 
-static void item_unlink_q(struct pagecache_engine *engine, hash_item *it) {
+static void item_unlink_q(struct items *items, hash_item *it) {
     hash_item **head, **tail;
-    head = &engine->items.heads;
-    tail = &engine->items.tails;
+    head = &items->heads;
+    tail = &items->tails;
 
     if (*head == it) {
         assert(it->prev == 0);
@@ -216,13 +245,12 @@ static void item_unlink_q(struct pagecache_engine *engine, hash_item *it) {
 
     if (it->next) it->next->prev = it->prev;
     if (it->prev) it->prev->next = it->next;
-    engine->items.sizes--;
+    items->sizes--;
     return;
 }
 
 int do_item_link(struct pagecache_engine *engine, hash_item *it) {
     assert((it->iflag & (ITEM_LINKED|ITEM_SLABBED)) == 0);
-
     it->iflag |= ITEM_LINKED;
     it->time = engine->server.core->get_current_time();
     assoc_insert(engine, engine->server.core->hash(item_get_key(it), it->nkey, 0),
@@ -230,31 +258,35 @@ int do_item_link(struct pagecache_engine *engine, hash_item *it) {
 
     pthread_mutex_lock(&engine->stats.lock);
     if (it->iflag & ITEM_SWAPPED)
-        engine->stats.curr_disk_bytes += ITEM_ntotal(engine, it);
+        engine->stats.curr_disk_bytes += it->nbytes;
     else
-        engine->stats.curr_mem_bytes += ITEM_ntotal(engine, it);
+        engine->stats.curr_mem_bytes += it->nbytes;
     engine->stats.curr_items += 1;
     engine->stats.total_items += 1;
     pthread_mutex_unlock(&engine->stats.lock);
 
-    item_link_q(engine, it);
+    item_link_q(&engine->mem_items, it);
 
     return 1;
 }
 
 void do_item_unlink(struct pagecache_engine *engine, hash_item *it) {
+    struct items *items;
     if ((it->iflag & ITEM_LINKED) != 0) {
         it->iflag &= ~ITEM_LINKED;
         pthread_mutex_lock(&engine->stats.lock);
-        if (it->iflag & ITEM_SWAPPED)
-            engine->stats.curr_disk_bytes -= ITEM_ntotal(engine, it);
-        else
-            engine->stats.curr_mem_bytes -= ITEM_ntotal(engine, it);
+        if (it->iflag & ITEM_SWAPPED) {
+            engine->stats.curr_disk_bytes -= it->nbytes;
+            items = &engine->disk_items;
+        } else {
+            engine->stats.curr_mem_bytes -= it->nbytes;
+            items = &engine->mem_items;
+        }
         engine->stats.curr_items -= 1;
         pthread_mutex_unlock(&engine->stats.lock);
         assoc_delete(engine, engine->server.core->hash(item_get_key(it), it->nkey, 0),
                      item_get_key(it), it->nkey);
-	item_unlink_q(engine, it);
+        item_unlink_q(items, it);
         if (it->refcount == 0) {
             item_free(engine, it);
         }
@@ -281,9 +313,9 @@ void do_item_update(struct pagecache_engine *engine, hash_item *it) {
         assert((it->iflag & ITEM_SLABBED) == 0);
 
         if ((it->iflag & ITEM_LINKED) != 0) {
-            item_unlink_q(engine, it);
+            item_unlink_q(&engine->mem_items, it);
             it->time = current_time;
-            item_link_q(engine, it);
+            item_link_q(&engine->mem_items, it);
         }
     }
 }
@@ -307,7 +339,7 @@ static void do_item_stats_sizes(struct pagecache_engine *engine,
 
     if (histogram != NULL) {
         /* build the histogram */
-        hash_item *iter = engine->items.heads;
+        hash_item *iter = engine->mem_items.heads;
         while (iter) {
             int ntotal = ITEM_ntotal(engine, iter);
             int bucket = ntotal / 32;
@@ -377,6 +409,57 @@ hash_item *do_item_get(struct pagecache_engine *engine,
 
     if (engine->config.verbose > 2)
         fprintf(stderr, "\n");
+
+    if (it != NULL && !it->data) {
+        if (it->iflag & ITEM_SWAPPED) {
+                 int mem_fd, disk_fd;
+                assert(!it->fd);
+                assert(!it->data);
+                chdir(DISK_CACHE_PATH);
+                disk_fd = open(item_get_key(it), O_RDWR, 00644);
+                if (mem_fd < 0) {
+                    perror("open");
+                    abort();
+                }
+                chdir(MEM_CACHE_PATH);
+                mem_fd = open(item_get_key(it), O_RDWR|O_CREAT, 00644);
+                if (ftruncate(mem_fd, it->nbytes)) {
+                    perror("ftruncate");
+                    abort();
+                }
+                if (recvfile(mem_fd, disk_fd, NULL, it->nbytes) != it->nbytes) {
+                    perror("recvfile");
+                    abort();
+                }
+                close(mem_fd);
+                close(disk_fd);
+                it->iflag &= ~ITEM_SWAPPED;
+                pthread_mutex_lock(&engine->stats.lock);
+                engine->stats.curr_mem_bytes += it->nbytes;
+                engine->stats.curr_disk_bytes -= it->nbytes;
+                pthread_mutex_unlock(&engine->stats.lock);
+                item_unlink_q(&engine->disk_items, it);
+                item_link_q(&engine->mem_items, it);
+        }
+        it->fd = open(item_get_key(it), O_RDWR, 00644);
+		if (it->fd < 0) {
+			perror("open");
+			it->fd = 0;
+            do_item_unlink(engine, it);
+            was_found--;
+            return NULL;
+		}
+		it->data = mmap(NULL, it->nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, it->fd, 0);
+		if(it->data == MAP_FAILED) {
+			perror("mmap");
+			close(it->fd);
+			it->fd = 0;
+			it->data = NULL;
+            do_item_unlink(engine, it);
+            was_found--;
+            return NULL;
+		}
+    }
 
     return it;
 }
@@ -552,7 +635,7 @@ void item_flush_expired(struct pagecache_engine *engine, time_t when) {
          * oldest_live time.
          * The oldest_live checking will auto-expire the remaining items.
          */
-        for (iter = engine->items.heads; iter != NULL; iter = next) {
+        for (iter = engine->mem_items.heads; iter != NULL; iter = next) {
             if (iter->time >= engine->config.oldest_live) {
                 next = iter->next;
                 if ((iter->iflag & ITEM_SLABBED) == 0) {
