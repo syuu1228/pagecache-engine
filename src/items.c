@@ -130,11 +130,11 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
     if ((it = (hash_item *)malloc(ntotal)) == NULL) {
         return NULL;
     }
+    
     memcpy((void*)item_get_key(it), key, nkey);
     ((char *)item_get_key(it))[nkey] = '\0';
 
     it->fd = open(item_get_key(it), O_RDWR|O_CREAT, 00644);
-    printf("do_item_alloc(%s) %d\n", item_get_key(it), it->fd);
     if (it->fd < 0) {
         perror("open");
         exit(1);
@@ -163,7 +163,6 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
     it->nkey = nkey;
     it->nbytes = nbytes;
     it->flags = flags;
-//    memcpy((void*)item_get_key(it), key, nkey);
     it->exptime = exptime;
     return it;
 }
@@ -268,7 +267,6 @@ void do_item_release(struct pagecache_engine *engine, hash_item *it) {
     }
     if (it->refcount == 0) {
         munmap(it->data, it->nbytes);
-        printf("do_item_release(%s) %d\n", item_get_key(it), it->fd);
         close(it->fd);
         it->fd = 0;
         it->data = NULL;
