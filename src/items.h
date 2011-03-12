@@ -20,7 +20,7 @@ typedef struct _hash_item {
                      * implementation. */
     unsigned short refcount;
 	int fd;
-	char *path;
+	char *ekey;
     void *data;
 } hash_item;
 

@@ -62,6 +62,45 @@ static inline size_t ITEM_ntotal(struct pagecache_engine *engine,
     return ret;
 }
 
+static char *escape_key(const char *key, const size_t nkey) {
+    int i, p = 0;
+    int pos_len = 1;
+    int *pos;
+    char *new_key, *nkp, *kp;
+
+retry:
+    pos = alloca(sizeof(int) * pos_len);
+    for (i = 0, p = 0; i < nkey; i++) {
+        if (key[i] == '/' || key[i] == '&') {
+            if (p == pos_len) {
+                pos_len *= 10;
+                goto retry;
+            }
+            pos[p++] = i;
+        }
+    }
+
+    if (!p)
+        return NULL;
+
+    new_key = malloc(nkey - p + (p * 5) + 1);
+    nkp = new_key;
+    kp = key;
+    for (i = 0; i < p; i++) {
+        while(kp < key + pos[i])
+            *nkp++ = *kp++;
+        strcpy(nkp, *kp == '/' ? "&#47;" : "&#38;");
+        nkp += 5;
+        kp++;
+    }
+    memcpy(nkp, kp, nkey - pos[p - 1]);
+    nkp += nkey - pos[p - 1];
+    *nkp = '\0';
+    puts(key);
+    puts(new_key);
+    return new_key;
+}
+
 /*@null@*/
 hash_item *do_item_alloc(struct pagecache_engine *engine,
                          const void *key,
@@ -76,6 +115,7 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
     int tries = 50;
     hash_item *search;
     rel_time_t current_time = engine->server.core->get_current_time();
+    char *ekey = escape_key((const char*)key, nkey);
 
     if (engine->stats.curr_mem_bytes >= MEM_MAX) {
         tries = 50;
@@ -95,13 +135,13 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
                 assert(!search->fd);
                 assert(!search->data);
                 assert(!(search->iflag & ITEM_SWAPPED));
-                mem_fd = open(item_get_key(search), O_RDWR, 00644);
+                mem_fd = open(ekey ? ekey : item_get_key(search), O_RDWR, 00644);
                 if (mem_fd < 0) {
                     perror("open");
                     abort();
                 }
                 chdir(DISK_CACHE_PATH);
-                disk_fd = open(item_get_key(search), O_RDWR|O_CREAT, 00644);
+                disk_fd = open(ekey ? ekey : item_get_key(search), O_RDWR|O_CREAT, 00644);
                 if (ftruncate(disk_fd, search->nbytes)) {
                     perror("ftruncate");
                     abort();
@@ -139,7 +179,6 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
                 pthread_mutex_lock(&engine->stats.lock);
                 engine->stats.evictions++;
                 pthread_mutex_unlock(&engine->stats.lock);
-                printf("evicting %s\n", item_get_key(search));
                 engine->server.stat->evicting(cookie,
                                               item_get_key(search),
                                               search->nkey);
@@ -149,19 +188,19 @@ hash_item *do_item_alloc(struct pagecache_engine *engine,
                 engine->stats.reclaimed++;
                 pthread_mutex_unlock(&engine->stats.lock);
             }
-            printf("unlinking %s\n", item_get_key(search));
             do_item_unlink(engine, search);
         }
     }
     
     if ((it = (hash_item *)malloc(ntotal)) == NULL) {
+        perror("malloc");
         return NULL;
     }
-    
+    it->ekey = ekey;
     memcpy((void*)item_get_key(it), key, nkey);
     ((char *)item_get_key(it))[nkey] = '\0';
 
-    it->fd = open(item_get_key(it), O_RDWR|O_CREAT, 00644);
+    it->fd = open(ekey ? ekey : item_get_key(it), O_RDWR|O_CREAT, 00644);
     if (it->fd < 0) {
         perror("open");
         free(it);
@@ -207,6 +246,8 @@ static void item_free(struct pagecache_engine *engine, hash_item *it) {
         chdir(MEM_CACHE_PATH);
     }else
         unlink(item_get_key(it));
+    if (it->ekey)
+        free(it->ekey);
     free(it);
 }
 
@@ -416,13 +457,13 @@ hash_item *do_item_get(struct pagecache_engine *engine,
                 assert(!it->fd);
                 assert(!it->data);
                 chdir(DISK_CACHE_PATH);
-                disk_fd = open(item_get_key(it), O_RDWR, 00644);
+                disk_fd = open(it->ekey ? it->ekey : item_get_key(it), O_RDWR, 00644);
                 if (mem_fd < 0) {
                     perror("open");
                     abort();
                 }
                 chdir(MEM_CACHE_PATH);
-                mem_fd = open(item_get_key(it), O_RDWR|O_CREAT, 00644);
+                mem_fd = open(it->ekey ? it->ekey : item_get_key(it), O_RDWR|O_CREAT, 00644);
                 if (ftruncate(mem_fd, it->nbytes)) {
                     perror("ftruncate");
                     abort();
@@ -441,7 +482,7 @@ hash_item *do_item_get(struct pagecache_engine *engine,
                 item_unlink_q(&engine->disk_items, it);
                 item_link_q(&engine->mem_items, it);
         }
-        it->fd = open(item_get_key(it), O_RDWR, 00644);
+        it->fd = open(it->ekey ? it->ekey : item_get_key(it), O_RDWR, 00644);
 		if (it->fd < 0) {
 			perror("open");
 			it->fd = 0;

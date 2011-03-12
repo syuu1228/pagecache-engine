@@ -201,10 +201,6 @@ static inline struct pagecache_engine* get_handle(ENGINE_HANDLE* handle) {
    return (struct pagecache_engine*)handle;
 }
 
-static inline hash_item* get_real_item(item* item) {
-    return (hash_item*)item;
-}
-
 static const engine_info* pagecache_get_info(ENGINE_HANDLE* handle) {
     return &get_handle(handle)->info.engine_info;
 }
@@ -286,7 +282,7 @@ static ENGINE_ERROR_CODE pagecache_item_delete(ENGINE_HANDLE* handle,
 static void pagecache_item_release(ENGINE_HANDLE* handle,
                                  const void *cookie,
                                  item* item) {
-   item_release(get_handle(handle), get_real_item(item));
+   item_release(get_handle(handle), item);
 }
 
 static ENGINE_ERROR_CODE pagecache_get(ENGINE_HANDLE* handle,
@@ -397,8 +393,7 @@ static ENGINE_ERROR_CODE pagecache_store(ENGINE_HANDLE* handle,
                                        uint16_t vbucket) {
     struct pagecache_engine *engine = get_handle(handle);
     VBUCKET_GUARD(engine, vbucket);
-    return store_item(engine, get_real_item(item), operation, 
-                      cookie);
+    return store_item(engine, item, operation, cookie);
 }
 
 static ENGINE_ERROR_CODE pagecache_arithmetic(ENGINE_HANDLE* handle,
